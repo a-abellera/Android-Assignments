@@ -1,0 +1,51 @@
+name: Build and Deploy WebGL for All Assignments
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+      # 1. Build Assignment 2
+      - name: Build WebGL for Assignment 2
+        run: |
+          cd $GITHUB_WORKSPACE/Android-Quiz-2_3D-Fan
+          chmod +x build_web.sh
+          ./build_web.sh
+      # 1. Build Assignment 3
+      - name: Build WebGL for Assignment 3
+        run: |
+          cd $GITHUB_WORKSPACE/Android-Quiz-3_Fan-Dashboard-HUD
+          chmod +x build_web.sh
+          ./build_web.sh
+      # 3. Assemble into a single staging directory
+      - name: Organize output folders
+        run: |
+          mkdir -p public/Assignment-2
+          mkdir -p public/Assignment-3
+          cp -r $GITHUB_WORKSPACE/Android-Quiz-2_3D-Fan/web/* public/Assignment-2/
+          cp -r $GITHUB_WORKSPACE/Android-Quiz-3_Fan-Dashboard-HUD/web/* public/Assignment-3/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
