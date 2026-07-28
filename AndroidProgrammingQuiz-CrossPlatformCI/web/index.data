@@ -1,0 +1,74 @@
+#version 300 es
+precision mediump float;
+
+in vec4 TriangleColor;
+out vec4 FragColor;
+
+void main()
+{
+    FragColor = TriangleColor;
+}
+#version 300 es
+layout(location = 0) in vec4 VertexPosition;
+layout(location = 1) in vec4 VertexColor;
+
+uniform float RadianAngle;
+
+out vec4 TriangleColor;
+
+void main()
+{
+    float c = cos(RadianAngle);
+    float s = sin(RadianAngle);
+
+    // 2D rotation matrix applied to XY, Z and W pass through
+    vec2 rotated = mat2(c, s, -s, c) * VertexPosition.xy;
+    gl_Position   = vec4(rotated, 0.0, 1.0);
+    TriangleColor = VertexColor;
+}
+#version 300 es
+
+/**
+ * @file    SquareFragment.glsl
+ * @author  Aracel Joy Balbaira ABELLERA
+ * @par     email: a.abellera@digipen.edu
+ * @par     DigiPen login: a.abellera
+ * @par     Course: CSD2101
+ * @par     Section A
+ * @data    06/29/2026
+ * @brief   Fragment shader for rendering a solid-colored square.
+ *          Receives interpolated vertex color data and outputs it as the final
+ *          fragment screen color.
+ */
+
+precision mediump float;
+
+in vec3 vColor;
+out vec4 fragColor;
+
+void main() {
+    fragColor = vec4(vColor, 1.0);
+}#version 300 es
+
+/**
+ * @file    SquareVertex.glsl
+ * @author  Aracel Joy Balbaira ABELLERA
+ * @par     email: a.abellera@digipen.edu
+ * @par     DigiPen login: a.abellera
+ * @par     Course: CSD2101
+ * @par     Section A
+ * @data    06/29/2026
+ * @brief   Vertex shader for rendering a static, unrotated square.
+ *          Maps raw clip-space vertex positions and forwards vertex colors
+ *          directly to the fragment stage.
+ */
+
+layout(location = 0) in vec2 aPosition;
+layout(location = 1) in vec3 aColor;
+
+out vec3 vColor;
+
+void main() {
+    vColor = aColor;
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+}

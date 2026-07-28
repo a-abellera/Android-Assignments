@@ -1,0 +1,10 @@
+/AndroidProgrammingQuiz-CrossPlatformCI/android/app/build/
+/Android-Quiz-2_3D-Fan/android/app/build/
+/Android-Quiz-3_Fan-Dashboard-HUD/android/app/build/
+/AndroidProgrammingQuiz-CrossPlatformCI/build_desktop/
+/Android-Quiz-2_3D-Fan/build_desktop/
+/Android-Quiz-3_Fan-Dashboard-HUD/build_desktop/
+.gradle/
+build/
+.cxx/
+.idea/
