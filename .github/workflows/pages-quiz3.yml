@@ -33,7 +33,7 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: web
+          path: ./Android-Quiz-3_Fan-Dashboard-HUD/web
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
