@@ -17,11 +17,17 @@
 // Platform detection
 // ---------------------------------------------------------------------------
 #ifdef __EMSCRIPTEN__
-    #define PLATFORM_EMSCRIPTEN
+#ifndef PLATFORM_EMSCRIPTEN
+        #define PLATFORM_EMSCRIPTEN
+    #endif
 #elif defined(_WIN32)
-    #define PLATFORM_WINDOWS
+#ifndef PLATFORM_WINDOWS
+        #define PLATFORM_WINDOWS
+    #endif
 #elif defined(__ANDROID__)
-    #define PLATFORM_ANDROID
+#ifndef PLATFORM_ANDROID
+#define PLATFORM_ANDROID
+#endif
 #endif
 
 // ---------------------------------------------------------------------------

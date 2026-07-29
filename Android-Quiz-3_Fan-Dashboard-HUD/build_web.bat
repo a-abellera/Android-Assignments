@@ -36,6 +36,9 @@ emcc -std=c++17 ^
      Scene/Renderer.cpp ^
      Scene/Transform.cpp ^
      Scene/Fan.cpp ^
+     Scene/Scene3D.cpp ^
+     Scene/SceneHUD.cpp ^
+     Scene/Ground.cpp ^
      -IScene ^
      -Iexternal/glm ^
      -DUSE_GLFW ^
@@ -45,6 +48,7 @@ emcc -std=c++17 ^
      -s WASM=1 ^
      -s ALLOW_MEMORY_GROWTH=1 ^
      --preload-file android/app/src/main/assets/shader@assets/shader ^
+     --preload-file android/app/src/main/assets/Models@Models ^
      -o web/index.html
 
 REM --- SDL2 backend (opt-in) ------------------------------------------------

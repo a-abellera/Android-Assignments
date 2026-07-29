@@ -1,58 +1,29 @@
 /**
  * @file Fan.cpp
- * @brief Logic for 3D Fan rendering, animation, and touch interaction.
- *
- * This implementation uses a single VAO/VBO for geometry and per-part colour
- * uploaded via the PARTCOLOR uniform.
- *
- * Hierarchy & Transform Logic:
- * Each part is wrapped in TransformPushMatrix() and TransformPopMatrix() to
- * isolate local transformations (Translate/Rotate/Scale). Transformations
- * are applied in parent-to-child order (post-multiplied).
- *
- * Gesture Logic:
- * Touch events are tracked via (lastX, lastY) and std::chrono to calculate
- * movement distance (for tap detection) and velocity (for drag boost).
+ * @brief Logic for 3D Fan model with ray-picking and hierarchy transforms.
  */
 
 #include "Fan.h"
 #include "ShaderHelper.h"
+#include "ObjHelper.h"
+#include "Platform.h"
 
 #include <glm/gtc/type_ptr.hpp>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <limits>
+
+#ifdef PLATFORM_ANDROID
+#include <android/asset_manager.h>
+#endif
 
 namespace
 {
-    // ---- one 8-vertex cube, shared by every part -------------------------
-    const GLfloat kCubePositions[ 8 * 3 ] =
-            {
-                    -0.5f, -0.5f,  0.5f,   // 0 front-bottom-left
-                    0.5f, -0.5f,  0.5f,   // 1 front-bottom-right
-                    0.5f,  0.5f,  0.5f,   // 2 front-top-right
-                    -0.5f,  0.5f,  0.5f,   // 3 front-top-left
-                    -0.5f, -0.5f, -0.5f,   // 4 back-bottom-left
-                    0.5f, -0.5f, -0.5f,   // 5 back-bottom-right
-                    0.5f,  0.5f, -0.5f,   // 6 back-top-right
-                    -0.5f,  0.5f, -0.5f,   // 7 back-top-left
-            };
-
-    const GLfloat kCubeShades[ 8 ] =
-            {
-                    1.0f, 1.0f, 1.0f, 1.0f,   // front face
-                    0.6f, 0.6f, 0.6f, 0.6f,   // back face
-            };
-
-    const GLushort kCubeIndices[ 36 ] =
-            {
-                    0, 1, 2,   2, 3, 0,   // front
-                    1, 5, 6,   6, 2, 1,   // right
-                    5, 4, 7,   7, 6, 5,   // back
-                    4, 0, 3,   3, 7, 4,   // left
-                    3, 2, 6,   6, 7, 3,   // top
-                    4, 5, 1,   1, 0, 4,   // bottom
-            };
-
 #if defined(__ANDROID__)
     constexpr const char *kVertexShaderPath   = "shader/FanVertex.glsl";
     constexpr const char *kFragmentShaderPath = "shader/FanFragment.glsl";
@@ -62,19 +33,14 @@ namespace
 #endif
 }
 
-const glm::vec3 Fan::kBaseColor = glm::vec3( 0.45f, 0.28f, 0.12f );
-const glm::vec3 Fan::kPoleColor = glm::vec3( 0.55f, 0.55f, 0.58f );
-const glm::vec3 Fan::kHubColor  = glm::vec3( 0.20f, 0.20f, 0.22f );
-const glm::vec3 Fan::kBladeColors[ 4 ] =
-        {
-                glm::vec3( 0.85f, 0.10f, 0.10f ),   // red
-                glm::vec3( 0.10f, 0.35f, 0.85f ),   // blue
-                glm::vec3( 0.95f, 0.55f, 0.10f ),   // orange
-                glm::vec3( 0.20f, 0.75f, 0.25f ),   // green
-        };
+const glm::vec3 Fan::kBaseColor  = glm::vec3( 1.00f, 0.81f, 0.89f );
+const glm::vec3 Fan::kPoleColor  = glm::vec3( 1.00f, 0.81f, 0.89f );
+const glm::vec3 Fan::kHubColor   = glm::vec3( 0.01f, 0.10f, 0.33f );
+const glm::vec3 Fan::kBladeColor = glm::vec3( 1.00f, 0.52f, 0.73f);
+const glm::vec3 Fan::kSelectedColor = glm::vec3( 0.99f, 0.85f, 0.45f);
 
 // -----------------------------------------------------------------------------
-// Construction / destruction
+// Construction / Destruction
 // -----------------------------------------------------------------------------
 
 #ifdef PLATFORM_ANDROID
@@ -82,24 +48,23 @@ Fan::Fan( AAssetManager* mgr ) : assetMgr( mgr )
 {
 }
 #else
-Fan::Fan( void )
+Fan::Fan()
 {
 }
 #endif
 
-Fan::~Fan( void )
+Fan::~Fan()
 {
     DeInitModel();
 }
 
 // -----------------------------------------------------------------------------
-// Part 1 -- static geometry: one VBO (positions + shades as two
-// sub-regions), one IBO, one VAO, one shader program.
+// Initialization & Camera Matrix Synchronization
 // -----------------------------------------------------------------------------
-
-// Builds the shader program and cube geometry, and initializes the
-// transform stack. Logs an error and returns early if shader setup fails.
-void Fan::InitModel( void )
+/**
+ * @brief Loads shaders and OBJ assets for multi-part fan geometry.
+ */
+void Fan::InitModel()
 {
     BuildShaders();
     if ( !shaderProgram )
@@ -108,18 +73,37 @@ void Fan::InitModel( void )
         return;
     }
 
-    mvpLoc   = glGetUniformLocation( shaderProgram, "MODELVIEWPROJECTIONMATRIX" );
-    colorLoc = glGetUniformLocation( shaderProgram, "PARTCOLOR" );
+    mvpLoc        = glGetUniformLocation( shaderProgram, "ModelViewProjectionMatrix" );
+    mvLoc         = glGetUniformLocation( shaderProgram, "ModelViewMatrix" );
+    normalMatLoc  = glGetUniformLocation( shaderProgram, "NormalMatrix" );
+    colorLoc      = glGetUniformLocation( shaderProgram, "PARTCOLOR" );
+
+    lightPosLoc   = glGetUniformLocation( shaderProgram, "LightPosition" );
+    ambientLoc    = glGetUniformLocation( shaderProgram, "LightAmbient" );
+    diffuseLoc    = glGetUniformLocation( shaderProgram, "LightDiffuse" );
+    specularLoc   = glGetUniformLocation( shaderProgram, "LightSpecular" );
+    shininessLoc  = glGetUniformLocation( shaderProgram, "ShininessFactor" );
 
     BuildCube();
-
+    BuildSphereHub();
+    BuildSemiHollowCylinder();
     transform.TransformInit();
-    lastMoveTime = std::chrono::steady_clock::now();
 }
 
-// Compiles and links the vertex/fragment shaders, dispatching to the
-// Android-asset loader or the filesystem/virtual-FS loader as appropriate.
-void Fan::BuildShaders( void )
+/**
+ * @brief Sets active view and projection matrices.
+ * @param view View transformation matrix.
+ * @param proj Projection matrix.
+ */
+void Fan::SetViewProjection( const glm::mat4 &view, const glm::mat4 &proj ) {
+    viewMatrix = view;
+    projMatrix = proj;
+}
+
+/**
+ * @brief Builds vertex and fragment shader program.
+ */
+void Fan::BuildShaders()
 {
 #ifdef PLATFORM_ANDROID
     shaderProgram = ShaderHelper::buildProgramFromAssets( assetMgr, kVertexShaderPath, kFragmentShaderPath );
@@ -128,187 +112,352 @@ void Fan::BuildShaders( void )
 #endif
 }
 
-// Uploads the shared cube's positions and per-corner shades into a single
-// VBO (as two sub-regions), uploads the index buffer, and wires both
-// vertex attributes into the VAO for later use in DrawPart().
-void Fan::BuildCube( void )
+static GLsizei cubeIndexCount = 0;
+
+/**
+ * @brief Loads cube OBJ geometry into VAO/VBO buffers.
+ */
+void Fan::BuildCube()
 {
-    glGenVertexArrays( 1, &vao );
-    glBindVertexArray( vao );
-
-    glGenBuffers( 1, &vbo );
-    glBindBuffer( GL_ARRAY_BUFFER, vbo );
-    glBufferData( GL_ARRAY_BUFFER, sizeof( kCubePositions ) + sizeof( kCubeShades ), nullptr, GL_STATIC_DRAW );
-    glBufferSubData( GL_ARRAY_BUFFER, 0,                        sizeof( kCubePositions ), kCubePositions );
-    glBufferSubData( GL_ARRAY_BUFFER, sizeof( kCubePositions ), sizeof( kCubeShades ),    kCubeShades );
-
-    // layout(location = 0) in vec3 POSITION;
-    glEnableVertexAttribArray( 0 );
-    glVertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, 0, reinterpret_cast<void *>( 0 ) );
-
-    // layout(location = 1) in float SHADE;
-    glEnableVertexAttribArray( 1 );
-    glVertexAttribPointer( 1, 1, GL_FLOAT, GL_FALSE, 0, reinterpret_cast<void *>( sizeof( kCubePositions ) ) );
-
-    glGenBuffers( 1, &ibo );
-    glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, ibo );
-    glBufferData( GL_ELEMENT_ARRAY_BUFFER, sizeof( kCubeIndices ), kCubeIndices, GL_STATIC_DRAW );
-
-    glBindVertexArray( 0 );
+    // Load CubeWithNormal.obj for Base and Blades (normalizing Y bounds to [0..1])
+#ifdef PLATFORM_ANDROID
+    OBJMeshData cubeMesh = ObjHelper::loadOBJ("CubeWithNormal.obj", true, assetMgr);
+#else
+    OBJMeshData cubeMesh = ObjHelper::loadOBJ("CubeWithNormal.obj", true);
+#endif
+    vao = cubeMesh.vao;
+    vbo = cubeMesh.vbo;
+    ibo = cubeMesh.ibo;
+    cubeIndexCount = cubeMesh.indexCount;
 }
 
-// Deletes the VAO, VBO, IBO, and shader program (if allocated) and resets
-// all handles to 0 so this is safe to call multiple times.
-void Fan::DeInitModel( void )
+/**
+ * @brief Loads sphere geometry for fan rotor hub.
+ */
+void Fan::BuildSphereHub()
+{
+    if ( vaoHub != 0 ) return;
+
+    // Load IsoSphere.obj for the Center Hub
+#ifdef PLATFORM_ANDROID
+    OBJMeshData hubMesh = ObjHelper::loadOBJ("IsoSphere.obj", false, assetMgr);
+#else
+    OBJMeshData hubMesh = ObjHelper::LoadOBJFromFile( "IsoSphere.obj", false );
+#endif
+    vaoHub = hubMesh.vao;
+    vboHub = hubMesh.vbo;
+    iboHub = hubMesh.ibo;
+    hubIndexCount = hubMesh.indexCount;
+}
+
+/**
+ * @brief Loads semi-hollow cylinder geometry for motor shroud.
+ */
+void Fan::BuildSemiHollowCylinder()
+{
+    if ( vaoCylinder != 0 ) return;
+
+    // Load SemiHollowCylinder.obj from the Models folder
+    // Set normalizeCubeY to false so it uses its original origin/pivot
+#ifdef PLATFORM_ANDROID
+    OBJMeshData cylinderMesh = ObjHelper::loadOBJ("SemiHollowCylinder.obj", false, assetMgr);
+#else
+    OBJMeshData cylinderMesh = ObjHelper::loadOBJ("SemiHollowCylinder.obj", false);
+#endif
+    vaoCylinder          = cylinderMesh.vao;
+    vboCylinder          = cylinderMesh.vbo;
+    iboCylinder          = cylinderMesh.ibo;
+    cylinderIndexCount   = cylinderMesh.indexCount;
+}
+
+/**
+ * @brief Frees GPU buffers and resets handles.
+ */
+void Fan::DeInitModel()
 {
     if ( vao )           glDeleteVertexArrays( 1, &vao );
-    if ( vbo )            glDeleteBuffers( 1, &vbo );
-    if ( ibo )            glDeleteBuffers( 1, &ibo );
-    if ( shaderProgram )  glDeleteProgram( shaderProgram );
+    if ( vbo )           glDeleteBuffers( 1, &vbo );
+    if ( ibo )           glDeleteBuffers( 1, &ibo );
+    if ( vaoHub )        glDeleteVertexArrays( 1, &vaoHub );
+    if ( vboHub )        glDeleteBuffers( 1, &vboHub );
+    if ( iboHub )        glDeleteBuffers( 1, &iboHub );
+    if ( vaoCylinder )   glDeleteVertexArrays( 1, &vaoCylinder );
+    if ( vboCylinder )   glDeleteBuffers( 1, &vboCylinder );
+    if ( iboCylinder )   glDeleteBuffers( 1, &iboCylinder );
+    if ( shaderProgram ) glDeleteProgram( shaderProgram );
 
-    vao = vbo = ibo = shaderProgram = 0;
+    vao = vbo = ibo = vaoHub = vboHub = iboHub = vaoCylinder = vboCylinder = iboCylinder = shaderProgram = 0;
 }
 
-// Updates the GL viewport to the new size and rebuilds the projection
-// matrix using the new aspect ratio.
+/**
+* @brief Handles window/screen resize events.
+* @param width Viewport width in pixels.
+* @param height Viewport height in pixels.
+*/
 void Fan::Resize( int width, int height )
 {
     glViewport( 0, 0, width, height );
     aspectRatio = ( height > 0 ) ? static_cast<float>( width ) / static_cast<float>( height ) : 1.0f;
-
-    transform.TransformSetMatrixMode( PROJECTION_MATRIX );
-    transform.TransformLoadIdentity();
-    transform.TransformSetPerspective( glm::radians( 60.0f ), aspectRatio, 0.01f, 1000.0f, 0.0f );
 }
 
 // -----------------------------------------------------------------------------
-// Part 1 (draw) + Part 2 (animate) -- seven draw calls per frame, each with
-// its own model matrix (Transform push/pop) and its own PARTCOLOR uniform.
+// Drawing with Matrices & Red Selection Highlight
 // -----------------------------------------------------------------------------
-
-// Uploads the current model-view-projection matrix and this part's color,
-// then draws the shared cube mesh using the currently bound transform.
-void Fan::DrawPart( const glm::vec3 &color )
+/**
+ * @brief Renders cube-based mesh parts (Base, Pole, Blades).
+ * @param partIndex Target part enumeration ID.
+ * @param defaultColor Color used when part is unselected.
+ */
+void Fan::DrawPart( int partIndex, const glm::vec3 &defaultColor )
 {
-    glm::mat4 mvp = *transform.TransformGetModelViewProjectionMatrix();
+    glm::vec3 finalColor = ( partIndex == selectedPartIndex )
+                           ? kSelectedColor
+                           : defaultColor;
 
-    glUniformMatrix4fv( mvpLoc, 1, GL_FALSE, glm::value_ptr( mvp ) );
-    glUniform3fv( colorLoc, 1, glm::value_ptr( color ) );
+    glUniform3fv( colorLoc, 1, glm::value_ptr( finalColor ) );
+
+    glm::mat4 modelMatrix = *transform.TransformGetModelViewMatrix();
+    glm::mat4 mvMatrix    = viewMatrix * modelMatrix;
+    glm::mat4 mvpMatrix   = projMatrix * mvMatrix;
+    glm::mat3 normalMat   = glm::transpose( glm::inverse( glm::mat3( mvMatrix ) ) );
+
+    glUniformMatrix4fv( mvpLoc, 1, GL_FALSE, glm::value_ptr( mvpMatrix ) );
+    glUniformMatrix4fv( mvLoc, 1, GL_FALSE, glm::value_ptr( mvMatrix ) );
+    glUniformMatrix3fv( normalMatLoc, 1, GL_FALSE, glm::value_ptr( normalMat ) );
 
     glBindVertexArray( vao );
-    glDrawElements( GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, reinterpret_cast<void *>( 0 ) );
+    glDrawElements( GL_TRIANGLES, cubeIndexCount, GL_UNSIGNED_SHORT, nullptr );
     glBindVertexArray( 0 );
 }
 
-// Advances the blade spin angle (if the fan is on), clears the frame, then
-// draws the base, pole, hub, and all four blades with their own transforms.
-void Fan::Render( void )
+/**
+ * @brief Renders sphere hub mesh part.
+ * @param partIndex Target part enumeration ID.
+ * @param defaultColor Unselected RGB color.
+ */
+void Fan::DrawHubPart( int partIndex, const glm::vec3 &defaultColor )
 {
-    // ---- Part 2: advance the blade angle -----------------------------
-    if ( fanOn )
-        spinAngle += kBaseSpeed + dragBoost;
-    if ( spinAngle >= 360.0f )
-        spinAngle -= 360.0f;
+    glm::vec3 finalColor = ( partIndex == selectedPartIndex )
+                           ? kSelectedColor
+                           : defaultColor;
 
-    glEnable( GL_DEPTH_TEST );
+    glUniform3fv( colorLoc, 1, glm::value_ptr( finalColor ) );
+
+    glm::mat4 modelMatrix = *transform.TransformGetModelViewMatrix();
+    glm::mat4 mvMatrix    = viewMatrix * modelMatrix;
+    glm::mat4 mvpMatrix   = projMatrix * mvMatrix;
+    glm::mat3 normalMat   = glm::transpose( glm::inverse( glm::mat3( mvMatrix ) ) );
+
+    glUniformMatrix4fv( mvpLoc, 1, GL_FALSE, glm::value_ptr( mvpMatrix ) );
+    glUniformMatrix4fv( mvLoc, 1, GL_FALSE, glm::value_ptr( mvMatrix ) );
+    glUniformMatrix3fv( normalMatLoc, 1, GL_FALSE, glm::value_ptr( normalMat ) );
+
+    glBindVertexArray( vaoHub );
+    glDrawElements( GL_TRIANGLES, hubIndexCount, GL_UNSIGNED_SHORT, nullptr );
+    glBindVertexArray( 0 );
+}
+
+/**
+ * @brief Renders cylinder mesh part.
+ * @param partIndex Target part enumeration ID.
+ * @param defaultColor Unselected RGB color.
+ */
+void Fan::DrawCylinderPart( int partIndex, const glm::vec3 &defaultColor )
+{
+    glm::vec3 finalColor = ( partIndex == selectedPartIndex )
+                           ? kSelectedColor
+                           : defaultColor;
+
+    glUniform3fv( colorLoc, 1, glm::value_ptr( finalColor ) );
+
+    glm::mat4 modelMatrix = *transform.TransformGetModelViewMatrix();
+    glm::mat4 mvMatrix    = viewMatrix * modelMatrix;
+    glm::mat4 mvpMatrix   = projMatrix * mvMatrix;
+    glm::mat3 normalMat   = glm::transpose( glm::inverse( glm::mat3( mvMatrix ) ) );
+
+    glUniformMatrix4fv( mvpLoc, 1, GL_FALSE, glm::value_ptr( mvpMatrix ) );
+    glUniformMatrix4fv( mvLoc, 1, GL_FALSE, glm::value_ptr( mvMatrix ) );
+    glUniformMatrix3fv( normalMatLoc, 1, GL_FALSE, glm::value_ptr( normalMat ) );
+
+    glBindVertexArray( vaoCylinder );
+    glDrawElements( GL_TRIANGLES, cylinderIndexCount, GL_UNSIGNED_SHORT, nullptr );
+    glBindVertexArray( 0 );
+}
+
+// -----------------------------------------------------------------------------
+// Render Loop & World Transform Caching
+// -----------------------------------------------------------------------------
+/**
+ * @brief Advances animation steps and renders base, pole, housing, hub, and blades.
+ */
+void Fan::Render()
+{
+    // Blade spin
+    spinAngle += currentSpeed * 0.005f;
+    if ( spinAngle >= 360.0f ) spinAngle -= 360.0f;
+
+    // Entire fan rotation (Showcase spin)
+    oscAngle += currentSpeed * 0.002f;
+    if ( oscAngle >= 360.0f ) oscAngle -= 360.0f;
+
     glUseProgram( shaderProgram );
 
-    glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
+    glm::vec3 lightPosWorld( 5.0f, 10.0f, 5.0f );
+    glm::vec3 lightPosEye = glm::vec3( viewMatrix * glm::vec4( lightPosWorld, 1.0f ) );
+    glUniform3f( lightPosLoc, lightPosEye.x, lightPosEye.y, lightPosEye.z );
+
+    glUniform3f( ambientLoc, 0.2f, 0.2f, 0.2f );
+    glUniform3f( diffuseLoc, 0.8f, 0.8f, 0.8f );
+    glUniform3f( specularLoc, 1.0f, 1.0f, 1.0f );
+    glUniform1f( shininessLoc, 32.0f );
 
     transform.TransformSetMatrixMode( MODEL_MATRIX );
     transform.TransformLoadIdentity();
 
-    // world: shared pull-back + 3D tilt, applied before every part so the
-    // whole fan reads as three-dimensional.
-    transform.TransformTranslate( 0.0f, 0.8f, -8.0f );
-    transform.TransformRotate( glm::radians( 20.0f ), 0.0f, 1.0f, 0.0f );
+    // Rotate entire fan showcase style
+    transform.TransformRotate( oscAngle, 0.0f, 1.0f, 0.0f );
 
-    // base -- sits on the "table"
+    // 1. Base (Fixed Proportions & Bounding Radius)
     transform.TransformPushMatrix();
-    transform.TransformTranslate( 0.0f, -2.6f, 0.0f );
-    transform.TransformScale( 1.6f, 0.25f, 0.8f );
-    DrawPart( kBaseColor );
+    transform.TransformTranslate( 0.0f, -2.0f, 0.0f );
+    cachedParts[ PART_BASE ].worldPos = glm::vec3( (*transform.TransformGetModelViewMatrix())[3] );
+    cachedParts[ PART_BASE ].radius   = 1.50f;
+    transform.TransformScale( 1.0f , 0.2f, 1.0f );
+    DrawPart( PART_BASE, kBaseColor );
     transform.TransformPopMatrix();
 
-    // pole -- connects hub to base
+    // 2. Pole (Fixed Proportions)
     transform.TransformPushMatrix();
-    transform.TransformTranslate( 0.0f, -1.21f, 0.0f );
-    transform.TransformScale( 0.15f, 2.53f, 0.15f );
-    DrawPart( kPoleColor );
+    transform.TransformTranslate( 0.0f, -2.0f, 0.0f );
+    cachedParts[ PART_POLE ].worldPos = glm::vec3( (*transform.TransformGetModelViewMatrix())[3] );
+    cachedParts[ PART_POLE ].radius   = 0.0f;
+    transform.TransformScale( 0.15f, 2.2f, 0.15f );
+    DrawPart( PART_POLE, kPoleColor );
     transform.TransformPopMatrix();
 
-    // hub -- pivot the blades rotate around
+    // 4. Housing / Shroud
     transform.TransformPushMatrix();
-    transform.TransformTranslate( 0.0f, 0.2f, 0.0f );
-    transform.TransformScale( 0.3f, 0.3f, 0.3f );
-    DrawPart( kHubColor );
+    transform.TransformTranslate( 0.0f, 0.2f, 0.25f );
+    cachedParts[ PART_HOUSING ].worldPos = glm::vec3( (*transform.TransformGetModelViewMatrix())[3] );
+    cachedParts[ PART_HOUSING ].radius   = 0.25f;
+    transform.TransformScale( 0.25f, 0.15f, 0.45f );
+    DrawCylinderPart( PART_HOUSING, kPoleColor );
     transform.TransformPopMatrix();
 
-    // four blades, 90 degrees apart, chasing spinAngle around the hub's Z axis
-    for ( int i = 0; i < 4; ++i )
+    // 3 & 5. Rotor assembly
+    transform.TransformPushMatrix();
+    transform.TransformTranslate( 0.0f, 0.2f, 0.75f );          // Shared rotor pivot matches top of pole
+    transform.TransformRotate( spinAngle, 0.0f, 0.0f, 1.0f );  // Blades spin
+
+    // 3. Hub Sphere
+    transform.TransformPushMatrix();
+    transform.TransformTranslate( 0.0f, 0.0f, 0.07f );
+    cachedParts[ PART_HUB ].worldPos = glm::vec3( (*transform.TransformGetModelViewMatrix())[3] );
+    cachedParts[ PART_HUB ].radius   = 0.25f;
+    transform.TransformScale( 0.35f, 0.35f, 0.35f );
+    DrawHubPart( PART_HUB, kHubColor );
+    transform.TransformPopMatrix();
+
+    // 5. 20 Alternating Blades
+    const int kNumBlades = 20;
+    const float kAngleStep = 360.0f / static_cast<float>( kNumBlades );
+
+    for ( int i = 0; i < kNumBlades; ++i )
     {
+        int bladePartID = PART_BLADE_0 + i;
+
         transform.TransformPushMatrix();
-        transform.TransformTranslate( 0.0f, 0.2f, 0.15f );
-        transform.TransformRotate( glm::radians( spinAngle + i * 90.0f ), 0.0f, 0.0f, 1.0f );
-        transform.TransformTranslate( 0.0f, 0.55f, 0.0f );
-        transform.TransformScale( 0.22f, 0.8f, 0.05f );
-        DrawPart( kBladeColors[ i ] );
+        transform.TransformRotate( static_cast<float>( i ) + kAngleStep, 0.0f, 0.0f, 0.5f );
+        transform.TransformTranslate( 0.0f, 0.35f, 0.04f ); // Pivot slightly offset from center
+
+        // Temporarily move out to the center of the blade geometry for accurate picking
+        transform.TransformPushMatrix();
+        transform.TransformTranslate( 0.0f, 0.6f, 0.0f );
+        cachedParts[ bladePartID ].worldPos = glm::vec3( (*transform.TransformGetModelViewMatrix())[3] );
+        transform.TransformPopMatrix();
+
+        cachedParts[ bladePartID ].radius = 0.40f; // Proper radius per blade
+
+        transform.TransformScale( 0.12f, 1.2f, 0.1f );
+
+        // Alternate colors between Orange and Yellow to match the reference
+        glm::vec3 color = ((i % 1) == 0) ? kBladeColor : kHubColor;
+        DrawPart( bladePartID, color );
+
         transform.TransformPopMatrix();
     }
+
+    transform.TransformPopMatrix(); // end rotor
 }
 
 // -----------------------------------------------------------------------------
-// Part 3 -- tap toggles fanOn.  Part 4 -- drag speed drives dragBoost.
-// A single gesture pipeline (down -> move* -> release) does both, split by
-// whether the finger/mouse moved more or less than kTapThreshold pixels.
+// Ray-Sphere Picking Logic
 // -----------------------------------------------------------------------------
-
-// Records the gesture's starting position and resets the accumulated
-// move distance used later to distinguish a tap from a drag.
-void Fan::TouchEventDown( float x, float y )
+/**
+ * @brief Performs ray-sphere intersection tests against sub-parts of the fan.
+ * @param rayOrigin Origin point of selection ray in world coordinates.
+ * @param rayDir Normalized direction vector of selection ray.
+ * @return True if a part was selected/toggled, false otherwise.
+ */
+bool Fan::PickAtRay( const glm::vec3 &rayOrigin, const glm::vec3 &rayDir )
 {
-    lastX = x;
-    lastY = y;
-    movedDistance = 0.0f;
-    dragBoost = 0.0f;
-    lastMoveTime  = std::chrono::steady_clock::now();
-}
+    float closestT = 1e9f;
+    int hitIndex   = -1;
 
-// Accumulates the distance moved since the last event and updates
-// dragBoost based on the pointer's velocity over that interval.
-void Fan::TouchEventMove( float x, float y )
-{
-    const float dx = x - lastX;
-    const float dy = y - lastY;
-    const float dist = std::sqrt(dx * dx + dy * dy);
-    movedDistance += dist;
+    for ( int i = 0; i < PART_COUNT; ++i ) {
+        if (i == PART_POLE || i == PART_HOUSING) continue;
 
-    const auto now = std::chrono::steady_clock::now();
-    const float dtMs = std::chrono::duration<float, std::milli>(now - lastMoveTime).count();
+        glm::vec3 oc = rayOrigin - cachedParts[i].worldPos;
+        float b = glm::dot( oc, rayDir );
+        float c = glm::dot( oc, oc ) - ( cachedParts[i].radius * cachedParts[i].radius );
+        float discriminant = b * b - c;
 
-    if (dtMs > 0.0f) {
-        const float velocity = dist / dtMs;
-        dragBoost = std::min(velocity * kBoostScale, kMaxBoost);
-        LOGI("Fan drag velocity %.3f px/ms", velocity);
+        if ( discriminant >= 0.0f ) {
+            float t = -b - sqrt( discriminant );
+            if ( t > 0.0f && t < closestT ) {
+                closestT = t;
+                hitIndex = i;
+            }
+        }
     }
 
-    lastX = x;
-    lastY = y;
-    lastMoveTime = now;
-}
+    if ( hitIndex != -1 ) {
+        std::string partName = GetPartName( hitIndex );
 
-// Ends the gesture: toggles fanOn if total movement stayed below
-// kTapThreshold (a tap rather than a drag), and always clears dragBoost.
-void Fan::TouchEventRelease( float x, float y )
-{
-    (void)x;
-    (void)y;
+        // Toggling OFF currently selected part
+        if ( hitIndex == selectedPartIndex ) {
+            LOGI( "%s picked - highlight off", partName.c_str() );
+            selectedPartIndex = -1;
+            return false;
+        }
 
-    if ( movedDistance < kTapThreshold )
-    {
-        fanOn = !fanOn;
-        LOGI( "Fan %s", fanOn ? "ON" : "OFF" );
+        // Toggling ON new selected part
+        selectedPartIndex = hitIndex;
+        LOGI( "%s picked - highlight on", partName.c_str() );
+        return true;
     }
 
-    dragBoost = 0.0f;
+    selectedPartIndex = -1;
+    return false;
+}
+
+/**
+ * @brief Returns human-readable label for a given internal part index.
+ * @param partIndex Internal PartID index value.
+ * @return String identifier of part name.
+ */
+std::string Fan::GetPartName(int partIndex) const
+{
+    if (partIndex == PART_BASE)    return "Base";
+    if (partIndex == PART_POLE)    return "Pole";
+    if (partIndex == PART_HOUSING) return "MotorEngine";
+    if (partIndex == PART_HUB)     return "Hub";
+
+    // Assuming 20 blades starting from PART_BLADE_0
+    if (partIndex >= PART_BLADE_0 && partIndex < PART_BLADE_0 + 20) {
+        int bladeNum = (partIndex - PART_BLADE_0) + 1; // 1-based index (Blade1 to Blade20)
+        return "Blade" + std::to_string(bladeNum);
+    }
+
+    return "Unknown";
 }

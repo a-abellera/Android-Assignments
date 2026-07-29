@@ -1,19 +1,6 @@
 /**
  * @file Fan.h
- * @brief Implementation of the 3D Fan model.
- *
- * Part Hierarchy:
- * The fan is constructed from a single shared cube geometry rendered seven times
- * using a hierarchical Transform stack (push/pop).
- * - Base: Static, sits on the table plane.
- * - Pole: Static, connects the base to the hub.
- * - Hub: Static, serves as the pivot point for the blades.
- * - Blades (x4): Dynamic, rotate around the hub's Z-axis, separated by 90°.
- *
- * Gesture Behaviour:
- * - TAP (movement < kTapThreshold): Toggles the fan state (ON/OFF).
- * - SWIPE/DRAG: Temporarily increases rotation speed proportional to drag velocity.
- *   Speed returns to kBaseSpeed upon release.
+ * @brief Definition of the 3D Fan model with ray-picking and hierarchy transforms.
  */
 
 #ifndef FAN_H
@@ -22,92 +9,196 @@
 #include "Model.h"
 #include "Transform.h"
 
-#include <chrono>
+#include <array>
+#include <string>
 #include <glm/glm.hpp>
 
 #ifdef PLATFORM_ANDROID
 #include <android/asset_manager.h>
 #endif
 
+/**
+ * @class Fan
+ * @brief Renders hierarchical fan components and resolves user ray interaction.
+ */
 class Fan : public Model
 {
 public:
 #ifdef PLATFORM_ANDROID
-    // Construct with the Android asset manager, used to load shader source
-    // from the APK's assets/ directory.
+    /**
+     * @brief Constructs Fan model bound to Android AssetManager.
+     * @param mgr Android AAssetManager pointer.
+     */
     explicit Fan( AAssetManager* mgr );
 #else
-    // Construct with no platform-specific state (desktop/web load shaders
-    // directly from the filesystem / virtual FS).
-    Fan( void );
+    /**
+     * @brief Default desktop constructor.
+     */
+    Fan();
 #endif
-    // Releases all GL resources via DeInitModel().
-    ~Fan( void ) override;
+    ~Fan() override;
 
-    // Builds shaders and cube geometry, and initializes the transform stack.
-    // Logs and returns early if shader compilation/linking fails.
-    void InitModel( void ) override;
+    /**
+     * @brief Loads shaders and OBJ assets for multi-part fan geometry.
+     */
+    void InitModel() override;
 
-    // Deletes VAO/VBO/IBO/shader program and resets their handles to 0.
-    // Not an override -- Model has no virtual DeInitModel().
-    void DeInitModel( void );
+    /**
+     * @brief Frees GPU buffers and resets handles.
+     */
+    void DeInitModel();
 
-    // Advances the blade spin angle, then draws base, pole, hub, and all
-    // four blades for the current frame.
-    void Render( void ) override;
+    /**
+     * @brief Advances animation steps and renders base, pole, housing, hub, and blades.
+     */
+    void Render() override;
 
-    // Updates the GL viewport and recomputes the projection matrix for the
-    // new aspect ratio.
+    /**
+     * @brief Handles window/screen resize events.
+     * @param width Viewport width in pixels.
+     * @param height Viewport height in pixels.
+     */
     void Resize( int width, int height ) override;
 
-    // Begins a touch/mouse gesture: records the start position and resets
-    // the accumulated move distance used to distinguish tap vs. drag.
-    void TouchEventDown( float x, float y ) override;
+    /**
+     * @brief Sets blade rotation speed multiplier.
+     * @param speed Speed value in degrees/sec scale.
+     */
+    void SetSpeed( float speed ) { currentSpeed = speed; }
 
-    // Continues a gesture: accumulates distance moved and updates dragBoost
-    // based on pointer velocity since the last move event.
-    void TouchEventMove( float x, float y ) override;
+    /**
+     * @brief Performs ray-sphere intersection tests against sub-parts of the fan.
+     * @param rayOrigin Origin point of selection ray in world coordinates.
+     * @param rayDir Normalized direction vector of selection ray.
+     * @return True if a part was selected/toggled, false otherwise.
+     */
+    bool PickAtRay( const glm::vec3 &rayOrigin, const glm::vec3 &rayDir );
 
-    // Ends a gesture: toggles fanOn if the total move distance was below
-    // kTapThreshold (i.e. it was a tap, not a drag), and clears dragBoost.
-    void TouchEventRelease( float x, float y ) override;
+    /**
+     * @brief Sets active view and projection matrices.
+     * @param view View transformation matrix.
+     * @param proj Projection matrix.
+     */
+    void SetViewProjection( const glm::mat4 &view, const glm::mat4 &proj );
+
+    /**
+     * @brief Returns human-readable label for a given internal part index.
+     * @param partIndex Internal PartID index value.
+     * @return String identifier of part name.
+     */
+    std::string GetPartName(int partIndex) const;
 
 private:
-    // Compiles and links the vertex/fragment shader program for this
-    // platform (Android assets vs. filesystem/virtual FS).
-    void BuildShaders( void );
+    enum PartID {
+        PART_BASE = 0,
+        PART_POLE,
+        PART_HUB,
+        PART_HOUSING,
+        PART_BLADE_0,
+        PART_BLADE_1,
+        PART_BLADE_2,
+        PART_BLADE_3,
+        PART_BLADE_4,
+        PART_BLADE_5,
+        PART_BLADE_6,
+        PART_BLADE_7,
+        PART_BLADE_8,
+        PART_BLADE_9,
+        PART_BLADE_10,
+        PART_BLADE_11,
+        PART_BLADE_12,
+        PART_BLADE_13,
+        PART_BLADE_14,
+        PART_BLADE_15,
+        PART_BLADE_16,
+        PART_BLADE_17,
+        PART_BLADE_18,
+        PART_BLADE_19,
+        PART_COUNT = 24
+    };
 
-    // Uploads the shared cube's positions, per-corner shades, and indices
-    // into a VBO/IBO, and configures the VAO's vertex attribute pointers.
-    void BuildCube( void );
+    struct PartData {
+        glm::vec3 worldPos;
+        float radius;
+    };
 
-    // Uploads the current model-view-projection matrix and part color
-    // uniforms, then issues the draw call for one cube-shaped part.
-    void DrawPart( const glm::vec3 &color );
-
-    Transform transform;
-
+    std::array<PartData, PART_COUNT> cachedParts;
+    int selectedPartIndex = -1;
+    float currentSpeed = 8.0f;
     float spinAngle = 0.0f;
-    bool  fanOn     = true;
-    float dragBoost = 0.0f;
+    float oscAngle = 0.0f;
 
-    static constexpr float kBaseSpeed    = 1.5f;
-    static constexpr float kMaxBoost     = 20.0f;
-    static constexpr float kBoostScale   = 8.0f;
-    static constexpr float kTapThreshold = 12.0f;
-
-    float lastX = 0.0f, lastY = 0.0f;
-    float movedDistance = 0.0f;
-    std::chrono::steady_clock::time_point lastMoveTime;
+    // Uniform locations for Phong shader
+    GLint mvpLoc       = -1;
+    GLint mvLoc        = -1;
+    GLint normalMatLoc = -1;
+    GLint colorLoc     = -1;
+    GLint lightPosLoc  = -1;
+    GLint ambientLoc   = -1;
+    GLint diffuseLoc   = -1;
+    GLint specularLoc  = -1;
+    GLint shininessLoc = -1;
 
     GLuint vbo = 0;
     GLuint ibo = 0;
     GLuint vao = 0;
+
+    // Hub Cylinder Geometry Buffers
+    GLuint vaoHub = 0;
+    GLuint vboHub = 0;
+    GLuint iboHub = 0;
+    GLsizei hubIndexCount = 0;
+
+    GLuint vaoCylinder = 0;
+    GLuint vboCylinder = 0;
+    GLuint iboCylinder = 0;
+    GLsizei cylinderIndexCount = 0;
+
     GLuint shaderProgram = 0;
-    GLint  mvpLoc   = -1;
-    GLint  colorLoc = -1;
 
     float aspectRatio = 1.0f;
+    Transform transform;
+
+    /**
+     * @brief Renders cube-based mesh parts (Base, Pole, Blades).
+     * @param partIndex Target part enumeration ID.
+     * @param defaultColor Color used when part is unselected.
+     */
+    void DrawPart( int partIndex, const glm::vec3 &defaultColor );
+
+    /**
+     * @brief Loads sphere geometry for fan rotor hub.
+     */
+    void BuildSphereHub();
+
+    /**
+     * @brief Renders sphere hub mesh part.
+     * @param partIndex Target part enumeration ID.
+     * @param defaultColor Unselected RGB color.
+     */
+    void DrawHubPart( int partIndex, const glm::vec3 &defaultColor );
+
+    /**
+     * @brief Loads semi-hollow cylinder geometry for motor shroud.
+     */
+    void BuildSemiHollowCylinder();
+
+    /**
+     * @brief Renders cylinder mesh part.
+     * @param partIndex Target part enumeration ID.
+     * @param defaultColor Unselected RGB color.
+     */
+    void DrawCylinderPart( int partIndex, const glm::vec3 &defaultColor );
+
+    /**
+     * @brief Builds vertex and fragment shader program.
+     */
+    void BuildShaders();
+
+    /**
+     * @brief Loads cube OBJ geometry into VAO/VBO buffers.
+     */
+    void BuildCube();
 
 #ifdef PLATFORM_ANDROID
     AAssetManager* assetMgr = nullptr;
@@ -116,7 +207,10 @@ private:
     static const glm::vec3 kBaseColor;
     static const glm::vec3 kPoleColor;
     static const glm::vec3 kHubColor;
-    static const glm::vec3 kBladeColors[ 4 ];
+    static const glm::vec3 kBladeColor;
+    static const glm::vec3 kSelectedColor;
+    glm::mat4 viewMatrix{ 1.0f };
+    glm::mat4 projMatrix{ 1.0f };
 };
 
 #endif // FAN_H

@@ -36,6 +36,9 @@ set(SCENE_SRC
         "${SCENE_DIR}/Renderer.cpp"
         "${SCENE_DIR}/Transform.cpp"
         "${SCENE_DIR}/Fan.cpp"
+        "${SCENE_DIR}/Scene3D.cpp"
+        "${SCENE_DIR}/SceneHUD.cpp"
+        "${SCENE_DIR}/Ground.cpp"
 )
 
 add_executable(fan3d ${SCENE_SRC})

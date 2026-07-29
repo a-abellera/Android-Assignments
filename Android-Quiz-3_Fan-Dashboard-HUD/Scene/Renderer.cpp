@@ -1,69 +1,131 @@
-#define LOG_TAG "Renderer"
+/**
+ * @file Renderer.cpp
+ * @brief Master renderer loop execution, depth buffer management, and touch event routing.
+ */
+
 #include "Renderer.h"
-#include "Fan.h"
-
-Renderer::~Renderer() { clearModels(); }
-
-#ifdef PLATFORM_ANDROID
-void Renderer::setAssetManager(AAssetManager* mgr) { assetMgr = mgr; }
+#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
+#include <GLES2/gl2.h>
+#else
+#include "Platform.h"
 #endif
 
-bool Renderer::initializeRenderer()
-{
-    LOGI("Renderer::initializeRenderer");
+Renderer::~Renderer() {
+    clearModels();
+}
+
+#ifdef PLATFORM_ANDROID
+/**
+ * @brief Binds asset manager pointer for Android builds.
+ */
+void Renderer::setAssetManager( AAssetManager* mgr ) {
+    assetMgr = mgr;
+}
+#endif
+
+/**
+ * @brief Constructs and initializes sub-models.
+ */
+bool Renderer::initializeRenderer() {
+    clearModels();
     createModels();
     initializeModels();
+    LOGI( "Renderer: Initialized successfully" );
     return true;
 }
 
-void Renderer::createModels()
-{
-    clearModels();
+/**
+ * @brief Allocates new Scene3D and SceneHUD heap instances.
+ */
+void Renderer::createModels() {
 #ifdef PLATFORM_ANDROID
-    models.push_back(new Fan(assetMgr));
+    scene3D  = new Scene3D( assetMgr );
+    sceneHUD = new SceneHUD( assetMgr, scene3D->GetFan(), scene3D );
 #else
-    models.push_back(new Fan());
+    scene3D  = new Scene3D();
+    sceneHUD = new SceneHUD( scene3D->GetFan(), scene3D );
 #endif
-    LOGI("Renderer: %zu model(s) created", models.size());
 }
 
-void Renderer::initializeModels()
-{
-    for (Model* m : models) m->InitModel();
+/**
+ * @brief Triggers geometry and shader initialization on sub-models.
+ */
+void Renderer::initializeModels() {
+    if ( scene3D )  scene3D->InitModel();
+    if ( sceneHUD ) sceneHUD->InitModel();
 }
 
-void Renderer::clearModels()
-{
-    for (Model* m : models) delete m;
-    models.clear();
+/**
+ * @brief Deallocates sub-model references safely.
+ */
+void Renderer::clearModels() {
+    delete sceneHUD;
+    delete scene3D;
+    sceneHUD = nullptr;
+    scene3D  = nullptr;
 }
 
-void Renderer::resize(int w, int h)
-{
+/**
+ * @brief Dispatches screen dimensions to active sub-models.
+ */
+void Renderer::resize( int w, int h ) {
     screenWidth  = w;
     screenHeight = h;
-    glViewport(0, 0, w, h);
-    for (Model* m : models) m->Resize(w, h);
-    LOGI("Renderer::resize %d x %d", w, h);
+
+    if ( scene3D )  scene3D->Resize( w, h );
+    if ( sceneHUD ) sceneHUD->Resize( w, h );
 }
 
-void Renderer::render()
-{
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    for (Model* m : models) m->Render();
+/**
+ * @brief Clears screen buffers and renders 3D world geometry followed by 2D HUD.
+ */
+void Renderer::render() {
+    // 1. Clear both Color and Depth buffers for the new frame
+    glClearColor( 0.15f, 0.15f, 0.18f, 1.0f );
+    glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
+
+    // 2. EXPLICITLY enable depth test & depth write for 3D Scene
+    glEnable( GL_DEPTH_TEST );
+    glDepthMask( GL_TRUE );
+    glDepthFunc( GL_LEQUAL );
+
+    if ( scene3D )  scene3D->Render();
+
+    // 3. Disable depth test for 2D HUD so HUD buttons render cleanly on top
+    glDisable( GL_DEPTH_TEST );
+    glDepthMask( GL_FALSE );
+
+    if ( sceneHUD ) sceneHUD->Render();
 }
 
-void Renderer::TouchEventDown(float x, float y)
-{
-    for (Model* m : models) m->TouchEventDown(x, y);
-}
-void Renderer::TouchEventMove(float x, float y)
-{
-    for (Model* m : models) m->TouchEventMove(x, y);
+/**
+ * @brief Directs touch inputs to HUD first; falls back to 3D ray picking if unhandled.
+ */
+void Renderer::TouchEventDown( float x, float y ) {
+    bool handledByHUD = false;
+    if ( sceneHUD ) {
+        handledByHUD = sceneHUD->OnTouch( x, y );
+    }
+
+    if ( !handledByHUD && scene3D ) {
+        scene3D->PickAt( x, y );
+    }
 }
 
-void Renderer::TouchEventRelease(float x, float y)
-{
-    for (Model* m : models) m->TouchEventRelease(x, y);
+/**
+ * @brief Routes drag event notifications to HUD handlers.
+ */
+void Renderer::TouchEventMove( float x, float y ) {
+    if ( sceneHUD ) {
+        sceneHUD->TouchMove( x, y );
+    }
+}
+
+/**
+ * @brief Routes touch release events to HUD handlers.
+ */
+void Renderer::TouchEventRelease( float x, float y ) {
+    if ( sceneHUD ) {
+        sceneHUD->TouchRelease( x, y );
+    }
 }
